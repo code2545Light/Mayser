@@ -11,6 +11,10 @@
 ; > [ソフトウェア的用途区分 - (AT)memorymap - os-wiki](http://oswiki.osask.jp/?%28AT%29memorymap#qd4cd666)
 ; リトルエンディアン
 
+CYLS    EQU     10              ; どこまで読み込むか (CYLinderS)
+                                ; EQUal 定数宣言(nasm)
+OS_BODY EQU      0xc200         ; OS本体が読み込まれている相対アドレス
+
         ;=======================================================================
         ; このプログラムがメモリ上のどこによみこまれるのか
         ; > [7.1.1 ORG: Binary File Program Origin - NASM - The Netwide Assembler](https://www.nasm.us/doc/nasmdoc7.html#section-7.1.1)
@@ -113,20 +117,133 @@
         ;=======================================================================
 
 entry:
-        MOV     AX, 0           ; AX (rw1) に0(imm8)代入
-        MOV     SS, AX
+                                ; [MOV命令 - Tips　IA32（x86）命令一覧　Mから始まる命令　MOV命令](http://softwaretechnique.jp/OS_Development/Tips/IA32_Instructions/MOV.html)
+                                ; /r － 命令の ModR/M バイトに、レジスタ・オペランドと R/M オペランドの両方があることを示す.
+                                ; Sreg － セグメントレジスタ. ビット割り当ては、ES=0,CS=1,SS=2,DS=3,FS=4,GS=5
+                                ; |        | Byte | OpeCode | 命令,              | Description
+        ; SSに0を代入
+        ; DSに0を代入
+        MOV     AX, 0           ; | B80000 |    3 | 0xB0+rb | MOV r8,   imm8     | imm8をr8に転送します
+        MOV     SS, AX          ; | 8ED0   |    2 | 0x8E /r | MOV Sreg, r/m16※※  | r/m16をセグメントレジスタに転送します ※※　MOV命令のリンク先参照
+                                ;                                                | MODR/M = mod + reg + r/m で構成されるのでそのうち
+                                ;                                                | r/mが指定する数値が表すレジスタを使用
+                                ;                                                | 例)
+                                ;                                                | mod=11, reg=???, r/m=000(b)=0(decimal)=AX
+                                ;                                                | reg には適当な値が入るのだろうか？
+                                ;                                                | 今回)
+                                ;                                                | D0= 11 010 000, r/m=000(b)=0(decimal)=AX
         MOV     SP, 0x7c00
-        MOV     DS, AX
-        MOV     ES, AX
+        MOV     DS, AX          ; 番地指定のとき重要
+                                ; どんなメモリの番地指定でもセグメントレジスタを一緒に指定しなくてはならない
+                                ; default : DS (data segment)
 
-       	call    register_dump  ; レジスターのダンプ
+        ;=====================
+        ; LOAD DISK
+        ; ディスクからの読み込み、ディスクへの書き込み、セクタのベリファイ、およびシーク
+        ;   |       |読み込み時|書き込み時|ベリファイ時|シーク時|
+        ;   | AH    | 0x02     | 0x03     | 0x04       | 0x0c   |
+        ;   | AL    | 処理するセクタ数（連続したセクタを処理できる） | 0x01～0xff (1-255, 0)
+        ;   | CH    | シリンダ番号 & 0xff | シリンダ番号は0x000～0x3ffの範囲で指定 （FDの場合は0x00～0x4f）
+        ;   | CL    | セクタ番号(bit0-5)  | (シリンダ番号 & 0x300) >> 2 | 0x01～0xffの範囲で指定（FDの場合は0x01～0x12）
+        ;   | DH    | ヘッド番号 | ヘッド番号は0x00～0xffの範囲で指定 （FDの場合は0x00～0x01）
+        ;   | DL    | ドライブ番号
+        ;   | ES:BX | バッファアドレス; （ベリファイ時、シーク時にはこれは参照しない）
+        ;   | 戻り値：
+        ;   |   FLAGS.CF | 0 | エラーなし, AH == 0
+        ;   |            | 1 | エラーあり, AHにエラーコード（リセットファンクションと同じ）
+        ;   > シークしてからアクセスしなければいけないというわけではない
+        ;   > HDDへのアクセスの場合,BIOSはパーティションを理解せず,ハード的に1台のデバイスを1ドライブとして扱う事に注意すること.
+        ;   > パーティション処理が必要なら自分でやるのだ.
+        ;   > BIOSのせいだったかどうか忘れましたが,FDDのブートセクタをリードするとなぜか0x03～0x0aの8バイトの内容だけが正しく読み込まれません（変なごみが入っている）.
+        ;   > I/Oを自分で制御してFDCをコントロールしたときはこんな変なことは起きません.
+        MOV     AX, 0x0820
+        MOV     ES, AX          ; Buffer Address | ES:BXのES
+                                ; > 0x8000～0x81ffの512バイトにはあとでブートセクタの内容を入れようかなと思った
+                                ; > なんで0x8000以降を使うことにしたのかというと、特に深い理由はないのですが、
+                                ; > メモリマップを見たらこのへんは誰も使っていないようだったので、「はりぼてOS」
+                                ; > が使わせてもらうことにしました
 
+        ; C0-H0-S2
+        MOV     CH, 0           ; シリンダ番号
+        MOV     DH, 0           ; ヘッド番号
+        MOV     CL, 2           ; セクタ番号
+
+        MOV     SI, 0           ; 失敗回数を数える
+
+readloop:
+        MOV     SI, 0           ; 失敗回数を数える
+
+retry:
+        ; 失敗しても5回はドライブリセットを試す
+        MOV     AH, 0x02        ; INT 0x13での読み込み指定
+        MOV     AL, 1           ; 読み込む連続したセクタ数
+        MOV     BX, 0           ; Buffer Address | ES:BXのBX
+        MOV     DL, 0x00        ; ドライブ番号 Aドライブ
+        INT     0x13            ; BIOS call -> エラーの時キャリーフラグが立つ
+                                ; [INT(0x13); ディスク関係 - (AT)BIOS - os-wiki](http://oswiki.osask.jp/?%28AT%29BIOS#q5006ed6)
+        JNC     next            ; Jump if Not CARRY FLAG == 1
+
+        ADD     SI, 1
+        CMP     SI, 5
+        JAE     error           ; if SI >= 5 then jump to error
+
+        MOV     AH, 0x00
+        MOV     DL, 0x00        ; ドライブを指定
+        INT     0x13            ; ドライブをリセット
+        JMP     retry
+
+next:
+        ; 18セクタ(=18*512 Byte)を読み込む
+        ; ディスクのうちの最初の10*2*18*512=184,320 Byte=180KB を読み込む
+        ; C0-H0-S3 - C9-H1-S18
+        ; メモリの 0x08200～0x34fff をディスクから読み込んだデータでびっしりと埋める
+        ; メモリ番地0x8200～0xa3ffに読み込まれた
+        ; > 　ループにする必要はなくて、ディスク読み込みのINT 0x13 のところで、ただALを17にしておけばすむのです
+        ; > これをループにしたのは、ディスクBIOSの読み込みファンクション(*)の説明のところの「補足」のところを気にしたから
+        ; > > 処理するセクタ数は0x01～0xffの範囲で指定（0x02以上を指定するときは、連続処理できる条
+        ; > > 件があるかもしれないので注意-- FDの場合は、たぶん、複数のトラックにはまたがれないし、
+        ; > > 64KB境界をこえてもいけない、だと思います）
+        MOV     AX, ES          ; ADD ES,0x020 という命令がないのでこうしている
+        ADD     AX, 0x0020      ; 512 / 16 = 0x20
+        MOV     ES, AX          ; 0x20だけアドレスを進める
+                                ; Buffer Register | ES:BX
+                                ; ES:BX | ES*0x10 + BX
+                                ; よって代わりにBXに512(=0x200)を足してもよい
+        ; セクタ SECTOR
+        ADD     CL, 1           ; セクタ番号を1増やす
+        CMP     CL, 18
+        JBE     readloop        ; 18セクタまで読み込んでいなければreadloopへ
+
+        ; ヘッド HEAD
+        MOV     CL, 1           ; reset SECTOR
+        ADD     DH, 1           ; reverse HEAD
+        CMP     DH, 2
+        JB      readloop        ; if (DH < 2) つまり HEADが両面読み込み終えていなければreadloopへ
+
+        ; シリンダ Cylinder
+        MOV     DH, 0           ; reset HEAD
+        ADD     CH, 1           ; CYLINDER += 1
+        CMP     CH, CYLS        ; 定数CYLSと比較
+        JB      readloop        ; CYLS分のCYLINDERを読み込み終えていないならばreadloopへ
+
+        ;=======================================================================
+        ; ブートセクタの読み込みが終わったのでOS本体を実行
+        ;JMP     0xc200
+        JMP     OS_BODY
+        ;=======================================================================
+
+fin:
+        HLT
+        JMP     fin             ; 無限ループ
+
+error:
         MOV     SI, msg
+
 putloop:
-        MOV     AL, BYTE [SI]   ; BYTE (accumulator low)
+        MOV     AL, BYTE [DS:SI]; DS*0x10 + SI, DSを明示, ここではDS=0
         ADD     SI, 1           ; increment stack index
         CMP     AL, 0           ; compare (<end msg>)
-        JZ      fin             ; jump to fin if equal to 0
+        JE      fin             ; jump to fin if equal to 0
 
                                 ; 一文字表示
         MOV     AH, 0x0e        ; AH = 0x0e
@@ -134,15 +251,13 @@ putloop:
         INT     0x10            ; interrupt BIOS
                                 ; [INT(0x10); ビデオ関係 - (AT)BIOS - os-wiki](http://oswiki.osask.jp/?%28AT%29BIOS#n5884802)
         JMP     putloop
-fin:
-        HLT
-        JMP     fin
 
 msg:
         DB      0x0a, 0x0a
-        DB      "HELLO! SKKS2"
+        DB      "load error"
         DB      0x0a
-        DB      0               ; end msg
+        DB      0                   ; end msg
+
 
 
 ;============================デバッグ用コード
