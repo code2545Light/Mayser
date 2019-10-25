@@ -5,9 +5,9 @@ import pprint
 import random
 
 #CSV-Readerで1行づつ順次読み込んでプリント
-with open('stocklist.csv') as f:
+with open('stocklist.csv', encoding="utf-8-sig") as f:
     #普通にプリント
-    #print(f.read())
+    print(f.read())
 
     reader = csv.reader(f)
     for row in reader:
@@ -17,7 +17,7 @@ with open('stocklist.csv') as f:
             print(row)
 
 #二次元配列（リストのリスト）として取得
-with open('stocklist.csv') as f:
+with open('stocklist.csv', encoding="utf-8-sig") as f:
     reader = csv.reader(f)
     l = [row for row in reader]
 
@@ -27,7 +27,7 @@ print(type(brand_random))
 print(brand_random)
 
 #辞書として読み込み
-with open('stocklist.csv') as f:
+with open('stocklist.csv', encoding="utf-8-sig") as f:
     reader = csv.DictReader(f)
     l = [row for row in reader]
 
