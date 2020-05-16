@@ -2,7 +2,7 @@ import csv
 import pprint
 import psycopg2
 
-#PostGresSQLへ接続
+#PostGresSQLへ接続aaa
 conn = psycopg2.connect("host=192.168.10.8 port=5432 dbname=mei_edinet_db user=mayser")
 cur = conn.cursor()
 
